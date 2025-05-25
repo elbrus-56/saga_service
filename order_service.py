@@ -91,9 +91,14 @@ class Order(BaseModel):
 async def create_order(
     order: Order,
     storage: AsyncIOMotorDatabase = Depends(get_db),
-) -> Literal[True]:
+) -> Order:
     await storage.orders.insert_one(order.model_dump())
-    return True
+    await router.broker.publish(
+        order,
+        exchange="orders",
+        routing_key="saga.start",
+    )
+    return order
 
 
 app = FastAPI()
