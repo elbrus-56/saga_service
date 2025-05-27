@@ -1,19 +1,17 @@
+import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Literal
-import uuid
+
 from fastapi import Depends, FastAPI
 from faststream.rabbit.fastapi import RabbitRouter
-
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pydantic import BaseModel, Field, model_validator
+from faststream.rabbit import ExchangeType, RabbitExchange, RabbitQueue
 
+from configs import settings
 
-router = RabbitRouter("amqp://admin:secret@localhost:5672/")
-
-client: AsyncIOMotorClient = AsyncIOMotorClient(
-    "mongodb://root:secret@127.0.0.1:27018/ecom?authSource=admin"
-)
+router = RabbitRouter(settings.rabbit_uri)
+client: AsyncIOMotorClient = AsyncIOMotorClient(settings.mongo_uri)
 
 
 async def get_db() -> AsyncIOMotorDatabase:
@@ -99,6 +97,29 @@ async def create_order(
         routing_key="saga.start",
     )
     return order
+
+
+exchange = RabbitExchange("orders", type=ExchangeType.TOPIC, durable=True)
+
+
+@router.subscriber(
+    RabbitQueue(
+        name="",
+        routing_key="order.compensations",
+    ),
+    exchange,
+)
+async def compensation_order(
+    order: Order,
+    storage: AsyncIOMotorDatabase = Depends(get_db),
+):
+    order.updated_at = int(datetime.now().timestamp() * 1e3)
+    await storage.orders.update_one(
+        {"order_id": str(order.order_id)},
+        {
+            "$set": {"status": OrderStatus.CANCELLED.value},
+        },
+    )
 
 
 app = FastAPI()

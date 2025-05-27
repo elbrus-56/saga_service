@@ -1,21 +1,17 @@
+import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Literal
-import uuid
+
 from fastapi import Depends, FastAPI
-from faststream.rabbit.fastapi import RabbitRouter, RabbitBroker
-from faststream.rabbit import RabbitQueue, RabbitExchange, ExchangeType
-
-
+from faststream.rabbit import ExchangeType, RabbitExchange, RabbitQueue
+from faststream.rabbit.fastapi import RabbitBroker, RabbitRouter
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator
 
+from configs import settings
 
-router = RabbitRouter("amqp://admin:secret@localhost:5672/")
-
-client: AsyncIOMotorClient = AsyncIOMotorClient(
-    "mongodb://root:secret@127.0.0.1:27018/ecom?authSource=admin"
-)
+router = RabbitRouter(settings.rabbit_uri)
+client: AsyncIOMotorClient = AsyncIOMotorClient(settings.mongo_uri)
 
 
 async def get_db() -> AsyncIOMotorDatabase:
@@ -30,7 +26,7 @@ class OrderStatus(str, Enum):
 
 
 class OrderItem(BaseModel):
-    product_id: uuid.UUID = Field(
+    product_id: str = Field(  # Изменено на str для хранения UUID в виде строки
         examples=["550e8400-e29b-41d4-a716-446655440000"],
         description="Уникальный идентификатор товара",
     )
@@ -46,22 +42,25 @@ class OrderItem(BaseModel):
 
 
 class Order(BaseModel):
-    order_id: uuid.UUID
-    user_id: uuid.UUID
+    order_id: str  # Изменено на str
+    user_id: str  # Изменено на str
     items: list[OrderItem]
     status: OrderStatus
-    created_at: int
+    created_at: int = Field(
+        default_factory=lambda: int(
+            datetime.now().timestamp() * 1000
+        )  # Явное приведение к int
+    )
     updated_at: int = Field(
-        default_factory=lambda: int(datetime.now().timestamp() * 1e3)
+        default_factory=lambda: int(datetime.now().timestamp() * 1000)
     )
 
-    @model_validator(mode="after")
-    def convert_uuid_to_str(self) -> "Order":
-        self.order_id = str(self.order_id)
-        self.user_id = str(self.user_id)
-        for item in self.items:
-            item.product_id = str(item.product_id)
-        return self
+    @field_validator("order_id", "user_id", mode="before")
+    @classmethod
+    def convert_uuid_to_str(cls, value: uuid.UUID | str) -> str:
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return value
 
 
 class StatusSaga(str, Enum):
@@ -77,85 +76,174 @@ class SagaState(BaseModel):
     steps: list[str]
 
 
-queue = RabbitQueue(name="saga_command", routing_key="saga.start", durable=True)
 exchange = RabbitExchange("orders", type=ExchangeType.TOPIC, durable=True)
 
 
 async def update_saga_state(
     storage: AsyncIOMotorDatabase,
     order_id: str,
-    status: str,
+    status: StatusSaga,  # Используем Enum
     step: str,
 ):
     await storage.sagas.update_one(
         {"order_id": order_id},
         {
-            "$set": {"status": status},
+            "$set": {"status": status.value},  # Сохраняем значение Enum
             "$push": {"steps": step},
         },
         upsert=True,
     )
 
 
-@router.subscriber(queue, exchange)
-async def saga_commands(
+@router.subscriber(
+    RabbitQueue(
+        name="saga_start_queue",
+        routing_key="saga.start",
+    ),
+    exchange,
+)
+async def saga_command_start(
     msg: Order,
     broker: RabbitBroker,
     storage: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    order_id = str(msg.order_id)
-
-    # Сохраняем начальное состояние саги
-    await storage.sagas.insert_one(
-        {
-            "order_id": order_id,
-            "status": StatusSaga.PENDING,
-            "steps": [],
-            "compensation_data": msg.model_dump(),
-        }
-    )
-
     try:
-        # 1. Проверка и резерв товара
-        reserve_ok = await broker.publish(
+        order_id = msg.order_id
+        await update_saga_state(
+            storage,
+            order_id,
+            StatusSaga.PENDING,
+            "inventory_reserved",
+        )
+        await broker.publish(
             msg,
             exchange="orders",
             routing_key="order.inventory",
-            rpc=True,  # Ждем ответа
         )
-        if not reserve_ok:
-            raise Exception("Inventory reserve failed")
+    except Exception as e:
+        await broker.publish(
+            {"error": str(e), "order": msg.model_dump()},
+            exchange="orders",
+            routing_key="saga.errors",
+        )
+
+
+@router.subscriber(
+    RabbitQueue(
+        name="saga_inventory_queue",
+        routing_key="saga.inventory.reserved",
+    ),
+    exchange,
+)
+async def saga_inventory_reserv_command(
+    msg: Order,
+    broker: RabbitBroker,
+    storage: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        order_id = msg.order_id
+        await update_saga_state(
+            storage,
+            order_id,
+            StatusSaga.PENDING,
+            "payment",
+        )
+        await broker.publish(
+            msg,
+            exchange="orders",
+            routing_key="order.payment",
+        )
+    except Exception as e:
+        await broker.publish(
+            {"error": str(e), "order": msg.model_dump()},
+            exchange="orders",
+            routing_key="saga.errors",
+        )
+
+
+@router.subscriber(
+    RabbitQueue(
+        name="saga_notify_queue",
+        routing_key="saga.notify",
+    ),
+    exchange,
+)
+async def saga_notify_command(
+    msg: Order,
+    broker: RabbitBroker,
+    storage: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        order_id = msg.order_id
         await update_saga_state(
             storage,
             order_id,
             StatusSaga.COMPLETED,
-            "inventory_reserved",
+            "notified",
         )
-        # # 2. Процессинг платежа
-        # payment_result = await broker.publish(
-        #     {
-        #         "order_id": order_id,
-        #         "user_id": msg["user_id"],
-        #         "amount": 999.99,  # Расчет суммы
-        #     },
-        #     queue="process_payment",
-        #     rpc=True,
-        # )
-
-        # # 3. Уведомление
-        # await broker.publish(
-        #     {
-        #         "order_id": order_id,
-        #         "user_id": msg["user_id"],
-        #         "message": "Order completed",
-        #     },
-        #     queue="send_notification",
-        # )
-
+        await broker.publish(
+            msg,
+            exchange="orders",
+            routing_key="order.notify.success",  # Отдельный ключ для успеха
+        )
     except Exception as e:
-        # Запуск компенсаций
-        # await broker.publish({"order_id": order_id}, queue="cancel_order")
-        print(f"Saga failed: {e}")
+        await broker.publish(
+            {"error": str(e), "order": msg.model_dump()},
+            exchange="orders",
+            routing_key="saga.errors",
+        )
+
+
+@router.subscriber(
+    RabbitQueue(
+        name="saga_compensation_queue",
+        routing_key="saga.compensation",
+    ),
+    exchange,
+)
+async def saga_compensation(
+    msg: Order,
+    broker: RabbitBroker,
+    storage: AsyncIOMotorDatabase = Depends(get_db),
+):
+    try:
+        order_id = msg.order_id
+        saga = await storage.sagas.find_one({"order_id": order_id})
+
+        if not saga:
+            raise ValueError(f"Saga for order {order_id} not found")
+
+        # Компенсация в обратном порядке
+        if "payment_processed" in saga.get("steps", []):
+            await broker.publish(
+                msg,
+                exchange="orders",
+                routing_key="order.inventory.compensation",
+            )
+        if "inventory_reserved" in saga.get("steps", []):
+            await broker.publish(
+                msg,
+                exchange="orders",
+                routing_key="order.compensations",
+            )
+
+        await update_saga_state(
+            storage,
+            order_id,
+            StatusSaga.FAILED,
+            "compensated",
+        )
+        await broker.publish(
+            msg,
+            exchange="orders",
+            routing_key="order.notify.failure",  # Отдельный ключ для ошибок
+        )
+    except Exception as e:
+        await broker.publish(
+            {"error": str(e), "order": msg.model_dump()},
+            exchange="orders",
+            routing_key="saga.errors",
+        )
 
 
 app = FastAPI()
