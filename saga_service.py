@@ -213,7 +213,6 @@ async def saga_compensation(
         if not saga:
             raise ValueError(f"Saga for order {order_id} not found")
 
-        # Компенсация в обратном порядке
         if "payment_processed" in saga.get("steps", []):
             await broker.publish(
                 msg,
@@ -236,7 +235,7 @@ async def saga_compensation(
         await broker.publish(
             msg,
             exchange="orders",
-            routing_key="order.notify.failure",  # Отдельный ключ для ошибок
+            routing_key="order.notify.failure",
         )
     except Exception as e:
         await broker.publish(

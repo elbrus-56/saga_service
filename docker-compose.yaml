@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:80"
+    environment:
+      SERVICE_NAME: "order_service"
+      MONGO_URI: mongodb://root:example@host.docker.internal:27017/ecom?authSource=admin
+      RABBIT_URI: amqp://admin:secret@host.docker.internal:5672/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    environment:
+      SERVICE_NAME: "inventory_service"
+      MONGO_URI: mongodb://root:example@host.docker.internal:27017/ecom?authSource=admin
+      RABBIT_URI: amqp://admin:secret@host.docker.internal:5672/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    environment:
+      SERVICE_NAME: "payment_service"
+      MONGO_URI: mongodb://root:example@host.docker.internal:27017/ecom?authSource=admin
+      RABBIT_URI: amqp://admin:secret@host.docker.internal:5672/
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  saga-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    environment:
+      SERVICE_NAME: "saga_service"
+      MONGO_URI: mongodb://root:example@host.docker.internal:27017/ecom?authSource=admin
+      RABBIT_URI: amqp://admin:secret@host.docker.internal:5672/
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
