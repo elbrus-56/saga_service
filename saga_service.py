@@ -26,7 +26,7 @@ class OrderStatus(str, Enum):
 
 
 class OrderItem(BaseModel):
-    product_id: str = Field(  # Изменено на str для хранения UUID в виде строки
+    product_id: str = Field(
         examples=["550e8400-e29b-41d4-a716-446655440000"],
         description="Уникальный идентификатор товара",
     )
@@ -42,14 +42,12 @@ class OrderItem(BaseModel):
 
 
 class Order(BaseModel):
-    order_id: str  # Изменено на str
-    user_id: str  # Изменено на str
+    order_id: str
+    user_id: str
     items: list[OrderItem]
     status: OrderStatus
     created_at: int = Field(
-        default_factory=lambda: int(
-            datetime.now().timestamp() * 1000
-        )  # Явное приведение к int
+        default_factory=lambda: int(datetime.now().timestamp() * 1000)
     )
     updated_at: int = Field(
         default_factory=lambda: int(datetime.now().timestamp() * 1000)
@@ -82,13 +80,13 @@ exchange = RabbitExchange("orders", type=ExchangeType.TOPIC, durable=True)
 async def update_saga_state(
     storage: AsyncIOMotorDatabase,
     order_id: str,
-    status: StatusSaga,  # Используем Enum
+    status: StatusSaga,
     step: str,
 ):
     await storage.sagas.update_one(
         {"order_id": order_id},
         {
-            "$set": {"status": status.value},  # Сохраняем значение Enum
+            "$set": {"status": status.value},
             "$push": {"steps": step},
         },
         upsert=True,
@@ -184,7 +182,7 @@ async def saga_notify_command(
         await broker.publish(
             msg,
             exchange="orders",
-            routing_key="order.notify.success",  # Отдельный ключ для успеха
+            routing_key="order.notify.success",
         )
     except Exception as e:
         await broker.publish(

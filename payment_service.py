@@ -58,7 +58,17 @@ async def payment_service(
 ):
     choice = random.choice([True, False])
     if not choice:
+        await router.broker.publish(
+            order,
+            exchange="orders",
+            routing_key="saga.compensation",
+        )
         raise Exception("Оплата не удалась")
+    await router.broker.publish(
+        order,
+        exchange="orders",
+        routing_key="saga.notify",
+    )
     return True
 
 

@@ -54,11 +54,13 @@ class Order(BaseModel):
     items: list[OrderItem] = Field(
         min_length=1,
         examples=[
-            {
-                "product_id": "550e8400-e29b-41d4-a716-446655440000",
-                "quantity": 2,
-                "price": 99.99,
-            }
+            [
+                {
+                    "product_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "quantity": 2,
+                    "price": 99.99,
+                },
+            ]
         ],
         description="Список товаров в заказе",
     )
@@ -70,10 +72,12 @@ class Order(BaseModel):
     created_at: int = Field(
         default_factory=lambda: int(datetime.now().timestamp() * 1e3),
         description="Дата создания заказа",
+        examples=[1748844512281],
     )
     updated_at: int = Field(
         default_factory=lambda: int(datetime.now().timestamp() * 1e3),
         description="Дата обновления заказа",
+        examples=[1748844512281],
     )
 
     @model_validator(mode="after")
